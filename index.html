@@ -17426,381 +17426,320 @@ Keeps existing branch IDs, but maps every boss key + difficulty + phase to a rea
 
 
 
-<!-- ============= VOID STORM v1: ORBIT-SPREAD-HOMING ORB BOMB FINAL ============= -->
+<!-- ============= VOID STORM v1.1.2: CONTACT-ONLY ORB BOMB FINAL ============= -->
 <script id="vs-orbit-spread-homing-orb-bomb-final">
 (function(){
   'use strict';
-  if(window.__VS_ORBIT_SPREAD_HOMING_ORB_BOMB_FINAL__) return;
-  window.__VS_ORBIT_SPREAD_HOMING_ORB_BOMB_FINAL__ = true;
-
   /*
-    Final bomb replacement requested by player:
-    1) Press BOMB.
-    2) Multiple large bright colored orbs rotate in a circle around the player.
-    3) The circle expands/spreads across the whole screen.
-    4) After a few seconds, the orbs aim at enemies/bosses and attack with stronger damage.
-    Safety rules:
-    - No full screen wipe.
-    - Do not clear bullets/lasers globally.
-    - Damage is contact/homing based, so it is powerful but not an instant boss delete.
-    - Single active bomb function: r1UseBomb.
+    v1.1.2 strict bomb behavior:
+    - Press BOMB: large bright orbs come out from the player ship.
+    - Orbs erase ONLY enemy bullets physically inside the visible orb body.
+    - Orbs damage/kill small enemies and damage bosses by contact only.
+    - No global bullet wipe. No delayed bullet wipe after the bomb ends.
+    - When the orbs vanish, all bomb cleanup stops and normal gameplay continues.
   */
-
-  var VS_ORB_BOMB = window.VS_ORB_BOMB = {
-    active:false,
-    tick:0,
-    duration:250,
-    orbs:[],
-    installCount:0,
-    audit:{
-      version:'orbit-spread-homing-orb-bomb-final-2026-05-02',
-      replaces:'old screen-wipe bomb and old simple orbit-only bomb',
-      sequence:['rotate around player','spread across entire screen','home into enemies with higher damage','fade out'],
-      noScreenWipe:true,
-      doesNotClear:['bullets','lasers','bossRotLasers','greenEnemyLasers'],
-      singleActiveFunction:'r1UseBomb',
-      preserved:['bomb stock','cooldown','invincibility','bomb button','pause','gallery','enemy spawning','bosses','mega bosses','mobile controls']
-    }
-  };
-
-  var COLORS = ['#fff56a','#66ffff','#ff66f7','#7cff6b','#ff8a3d','#b37cff','#ffffff','#44aaff','#ff4477','#aaff44'];
-  var CFG = {
+  var COLORS=['#fff56a','#66ffff','#ff66f7','#7cff6b','#ff8a3d','#b37cff','#ffffff','#44aaff','#ff4477','#aaff44'];
+  var CFG={
     START_BOMBS:3,
     MAX_BOMBS:5,
     COOLDOWN:150,
-    INV:105,
-    DURATION:250,
+    INV:76,
+    DURATION:218,
     ORB_COUNT:10,
-    ORBIT_END:58,
-    SPREAD_END:142,
+    ORBIT_END:48,
+    SPREAD_END:112,
     HIT_INTERVAL:4,
-    SMALL_DAMAGE:9.5,
-    BOSS_DAMAGE:4.8,
-    MEGA_DAMAGE:3.6,
-    BULLET_CANCEL_RADIUS:8,
-    SCORE_PER_HIT:8
+    SMALL_DAMAGE:9,
+    BOSS_DAMAGE:4.2,
+    MEGA_DAMAGE:3.2,
+    CONTACT_CANCEL_SCALE:1.88,
+    CONTACT_DAMAGE_PAD:13,
+    SCORE_PER_SMALL:22,
+    SCORE_PER_BOSS_HIT:8
   };
 
-  function safe(fn){ try{return fn();}catch(e){ try{console.warn('[VS spread homing bomb]', e && e.message ? e.message : e);}catch(_){}} }
-  function num(v,d){ v=Number(v); return Number.isFinite(v)?v:d; }
-  function clamp2(v,a,b){ return Math.max(a, Math.min(b, v)); }
-  function dist2(ax,ay,bx,by){ return Math.hypot(num(bx,0)-num(ax,0), num(by,0)-num(ay,0)); }
-  function angleTo(ax,ay,bx,by){ return Math.atan2(num(by,0)-num(ay,0), num(bx,0)-num(ax,0)); }
-  function lerp2(a,b,t){ return a+(b-a)*t; }
-  function ease(t){ t=clamp2(t,0,1); return 1-Math.pow(1-t,3); }
+  var STATE=window.VS_ORB_BOMB={
+    active:false,
+    tick:0,
+    duration:CFG.DURATION,
+    orbs:[],
+    lastUseKey:null,
+    audit:{
+      version:'v1.1.2-contact-only-orb-bomb',
+      behavior:'orbs erase bullets only when bullets are physically inside the orb; no global wipe; no delayed cleanup after vanish',
+      phases:['ship orbit bullet contact clear','screen spread contact clear','homing contact damage','vanish then normal gameplay'],
+      noGlobalBulletWipe:true,
+      noDelayedPostBombCleanup:true,
+      preserved:['music','pause','gallery','bosses','enemies','difficulty buttons','mobile touch']
+    }
+  };
 
-  function syncBombHud(){
+  function safe(fn){ try{return fn();}catch(e){ try{console.warn('[VS v1.1.2 orb bomb]', e&&e.message?e.message:e);}catch(_){}} }
+  function n(v,d){ v=Number(v); return Number.isFinite(v)?v:(d||0); }
+  function clamp(v,a,b){ return Math.max(a,Math.min(b,v)); }
+  function dist(ax,ay,bx,by){ var dx=n(ax)-n(bx), dy=n(ay)-n(by); return Math.sqrt(dx*dx+dy*dy); }
+  function angleTo(ax,ay,bx,by){ return Math.atan2(n(by)-n(ay), n(bx)-n(ax)); }
+  function lerp(a,b,t){ return a+(b-a)*t; }
+  function ease(t){ t=clamp(t,0,1); return 1-Math.pow(1-t,3); }
+  function screenW(){ return (typeof CW==='number'&&CW>0)?CW:480; }
+  function screenH(){ return (typeof CH==='number'&&CH>0)?CH:640; }
+
+  function syncHud(){
     safe(function(){ if(typeof r1SyncHUD==='function') r1SyncHUD(); });
-    safe(function(){ var el=document.getElementById('bomb-disp'); if(el && typeof R1!=='undefined') el.textContent=String(R1.bombs||0); });
+    safe(function(){ var el=document.getElementById('bomb-disp'); if(el&&typeof R1!=='undefined') el.textContent=String(Math.max(0,Math.floor(n(R1.bombs,0)))); });
     safe(function(){
-      var btn=document.getElementById('bomb-btn');
-      if(!btn || typeof R1==='undefined') return;
-      btn.textContent = (R1.bombCooldown>0) ? 'BOMB CD' : 'BOMB';
-      btn.style.opacity = (R1.bombs<=0 || R1.bombCooldown>0) ? '0.58' : '1';
+      var btn=document.getElementById('bomb-btn'); if(!btn||typeof R1==='undefined') return;
+      var bombs=Math.max(0,Math.floor(n(R1.bombs,0))), cd=Math.max(0,Math.floor(n(R1.bombCooldown,0)));
+      btn.textContent=cd>0?'BOMB CD':('BOMB '+bombs);
+      btn.disabled=(!isPlaying())||bombs<=0||cd>0;
+      btn.style.opacity=(bombs<=0||cd>0)?'0.58':'1';
+      btn.style.pointerEvents=isPlaying()?'auto':'none';
     });
   }
-
-  function resetOrbBomb(){
-    VS_ORB_BOMB.active=false;
-    VS_ORB_BOMB.tick=0;
-    VS_ORB_BOMB.orbs=[];
+  function isPlaying(){
+    var go=true;
+    safe(function(){ go = (typeof gameRunning==='undefined') ? true : !!gameRunning; });
+    if(!go) return false;
+    if(document.body && document.body.classList && document.body.classList.contains('vs-gallery-open')) return false;
+    var ov=document.getElementById('overlay');
+    if(ov && ov.classList && !ov.classList.contains('hidden')) return false;
+    return true;
   }
-
-  function allTargets(){
-    var arr=[];
-    safe(function(){
-      if(Array.isArray(enemies)) for(var i=0;i<enemies.length;i++){
-        var e=enemies[i]; if(e && typeof e.hp==='number' && e.hp>0) arr.push({obj:e,type:'small',x:e.x,y:e.y,r:num(e.r,num(e.radius,12))});
-      }
-    });
-    safe(function(){
-      if(Array.isArray(bosses)) for(var j=0;j<bosses.length;j++){
-        var b=bosses[j]; if(b && typeof b.hp==='number' && b.hp>0) arr.push({obj:b,type:'boss',x:b.x,y:b.y,r:num(b.r,58)});
-      }
-    });
-    safe(function(){
-      if(typeof megaBoss!=='undefined' && megaBoss && typeof megaBoss.hp==='number' && megaBoss.hp>0){
-        arr.push({obj:megaBoss,type:'mega',x:megaBoss.x,y:megaBoss.y,r:num(megaBoss.r,78)});
-      }
-    });
-    return arr;
+  function resetBomb(){
+    STATE.active=false;
+    STATE.tick=0;
+    STATE.orbs.length=0;
   }
-
-  function nearestTarget(x,y,avoidObj){
-    var t=allTargets(), best=null, bd=Infinity;
-    for(var i=0;i<t.length;i++){
-      if(avoidObj && t[i].obj===avoidObj && t.length>1) continue;
-      var dd=dist2(x,y,t[i].x,t[i].y);
-      if(dd<bd){ bd=dd; best=t[i]; }
+  function enemyRadius(e){ return Math.max(n(e&&e.r,0), n(e&&e.radius,0), n(e&&e.sz,0), n(e&&e.w,0)*0.35, n(e&&e.h,0)*0.35, 10); }
+  function bossRadius(b,isMega){ return Math.max(n(b&&b.r,0), n(b&&b.radius,0), n(b&&b.w,0)*0.5, isMega?76:46); }
+  function collectTargets(){
+    var out=[];
+    safe(function(){ if(Array.isArray(enemies)) for(var i=0;i<enemies.length;i++){ var e=enemies[i]; if(e&&typeof e.hp==='number'&&e.hp>0) out.push({obj:e,type:'small',x:n(e.x),y:n(e.y),r:enemyRadius(e),index:i}); } });
+    safe(function(){ if(Array.isArray(bosses)) for(var j=0;j<bosses.length;j++){ var b=bosses[j]; if(b&&typeof b.hp==='number'&&b.hp>0) out.push({obj:b,type:'boss',x:n(b.x,screenW()/2),y:n(b.y,110),r:bossRadius(b,false)}); } });
+    safe(function(){ if(typeof boss!=='undefined'&&boss&&typeof boss.hp==='number'&&boss.hp>0) out.push({obj:boss,type:'boss',x:n(boss.x,screenW()/2),y:n(boss.y,110),r:bossRadius(boss,false)}); });
+    safe(function(){ if(typeof megaBoss!=='undefined'&&megaBoss&&typeof megaBoss.hp==='number'&&megaBoss.hp>0) out.push({obj:megaBoss,type:'mega',x:n(megaBoss.x,screenW()/2),y:n(megaBoss.y,135),r:bossRadius(megaBoss,true)}); });
+    return out;
+  }
+  function targetAlive(ref){
+    if(!ref||!ref.obj||typeof ref.obj.hp!=='number'||ref.obj.hp<=0) return null;
+    var isMega=ref.type==='mega', isBoss=ref.type==='boss';
+    return {obj:ref.obj,type:ref.type,x:n(ref.obj.x,ref.x),y:n(ref.obj.y,ref.y),r:isBoss||isMega?bossRadius(ref.obj,isMega):enemyRadius(ref.obj)};
+  }
+  function nearestTarget(x,y,avoid){
+    var list=collectTargets(), best=null, bd=Infinity;
+    for(var i=0;i<list.length;i++){
+      if(avoid&&list[i].obj===avoid&&list.length>1) continue;
+      var d=dist(x,y,list[i].x,list[i].y);
+      if(d<bd){ bd=d; best=list[i]; }
     }
     return best;
   }
-
-  function targetByRef(ref){
-    if(!ref || !ref.obj || typeof ref.obj.hp!=='number' || ref.obj.hp<=0) return null;
-    return {obj:ref.obj,type:ref.type,x:ref.obj.x,y:ref.obj.y,r:num(ref.obj.r,num(ref.obj.radius,ref.type==='mega'?78:(ref.type==='boss'?58:12)))};
-  }
-
-  function startOrbBomb(){
-    var px=num(player && player.x,240), py=num(player && player.y,520);
-    resetOrbBomb();
-    VS_ORB_BOMB.active=true;
-    VS_ORB_BOMB.tick=0;
-    VS_ORB_BOMB.duration=CFG.DURATION;
+  function startBomb(){
+    var w=screenW(), h=screenH();
+    var px=n((typeof player!=='undefined'&&player)&&player.x,w/2), py=n((typeof player!=='undefined'&&player)&&player.y,h-92);
+    resetBomb();
+    STATE.active=true;
+    STATE.duration=CFG.DURATION;
     for(var i=0;i<CFG.ORB_COUNT;i++){
       var a=i*Math.PI*2/CFG.ORB_COUNT;
-      var edgeX = (i%4===0) ? -30 : (i%4===1 ? 510 : (40 + (i*83)%400));
-      var edgeY = (i%4===2) ? -30 : (i%4===3 ? 670 : (70 + (i*61)%480));
-      VS_ORB_BOMB.orbs.push({
-        a:a,
-        spin:(i%2===0?1:-1)*(0.075+i*0.004),
-        col:COLORS[i%COLORS.length],
-        phase:i*0.63,
-        size:20+(i%3)*4,
-        x:px,y:py,
-        vx:0,vy:0,
-        spreadX:edgeX,
-        spreadY:edgeY,
-        target:null,
-        hitFlash:0,
-        trail:[]
+      var row=Math.floor(i/2);
+      var sx=(i%2===0)?(42+row*(w-84)/4):(w-42-row*(w-84)/4);
+      var sy=64+((i*73)%(h-158));
+      STATE.orbs.push({
+        a:a, spin:(i%2?-.078:.078)+(i*0.0025), phase:i*.61,
+        col:COLORS[i%COLORS.length], size:24+(i%3)*4,
+        x:px, y:py, vx:0, vy:0, spreadX:sx, spreadY:sy,
+        target:null, hitFlash:0, trail:[]
       });
     }
-    safe(function(){ if(typeof sparks==='function') sparks(px,py,52,'#ffffff',5.2,32); });
-    safe(function(){ if(typeof shake==='function') shake(8,22); });
+    safe(function(){ if(typeof sparks==='function') sparks(px,py,38,'#ffffff',4.6,26); });
+    safe(function(){ if(typeof shake==='function') shake(5,16); });
   }
-
-  function damageTarget(t, orb){
-    if(!t || !t.obj || typeof t.obj.hp!=='number') return false;
-    var amount = t.type==='small' ? CFG.SMALL_DAMAGE : (t.type==='mega' ? CFG.MEGA_DAMAGE : CFG.BOSS_DAMAGE);
-    // Boss / mega safety: strong repeated damage, but not instant kill from one bomb tick.
-    if(t.type!=='small') amount = Math.min(amount, Math.max(1.2, num(t.obj.maxHp,500)*0.006));
-    t.obj.hp -= amount;
-    if(t.type!=='small' && t.obj.hp<1) t.obj.hp=1;
-    if(typeof score==='number') score += t.type==='small' ? 22 : CFG.SCORE_PER_HIT;
-    orb.hitFlash=8;
-    safe(function(){ if(typeof sparks==='function') sparks(t.x,t.y,t.type==='small'?10:7,orb.col,2.4,12); });
-    return true;
-  }
-
-  function damageNearOrb(orb, strong){
-    var targets=allTargets(), hit=false;
-    var rad=orb.size + (strong?24:15);
-    for(var i=0;i<targets.length;i++){
-      var t=targets[i];
-      if(dist2(orb.x,orb.y,t.x,t.y) <= rad + t.r){
-        damageTarget(t,orb);
-        hit=true;
-      }
-    }
-    return hit;
-  }
-
-  function cancelTouchedBullets(orb){
-    // Not a screen wipe: only bullets physically touched by the large orb vanish.
+  function cancelBulletsInsideOrb(o){
+    if(!STATE.active) return;
+    var r=o.size*CFG.CONTACT_CANCEL_SCALE;
     safe(function(){
       if(!Array.isArray(bullets)) return;
-      var rad=orb.size + CFG.BULLET_CANCEL_RADIUS;
       for(var i=bullets.length-1;i>=0;i--){
-        var b=bullets[i]; if(!b) continue;
-        if(dist2(orb.x,orb.y,b.x,b.y) <= rad + num(b.sz,4)) bullets.splice(i,1);
+        var b=bullets[i];
+        if(!b||!Number.isFinite(Number(b.x))||!Number.isFinite(Number(b.y))){ bullets.splice(i,1); continue; }
+        if(dist(o.x,o.y,b.x,b.y) <= r + Math.max(2,n(b.sz,4))){
+          safe(function(){ if(typeof sparks==='function') sparks(b.x,b.y,3,b.col||o.col,1.2,6); });
+          bullets.splice(i,1);
+        }
       }
     });
   }
-
-  function updateOrbBomb(){
-    if(!VS_ORB_BOMB.active) return;
-    if(typeof gameRunning!=='undefined' && !gameRunning){ resetOrbBomb(); return; }
-    var t=++VS_ORB_BOMB.tick;
-    var px=num(player && player.x,240), py=num(player && player.y,520);
-    var attackMode = t > CFG.SPREAD_END;
-
-    for(var i=0;i<VS_ORB_BOMB.orbs.length;i++){
-      var o=VS_ORB_BOMB.orbs[i];
-      o.trail.push({x:o.x,y:o.y});
-      if(o.trail.length>8) o.trail.shift();
-
-      if(t <= CFG.ORBIT_END){
-        // Phase 1: tight rotating circle around player.
-        o.a += o.spin;
-        var p1=t/CFG.ORBIT_END;
-        var rr=lerp2(18,68+(i%4)*7,ease(p1));
-        o.x = px + Math.cos(o.a)*rr;
-        o.y = py + Math.sin(o.a)*rr*0.78;
-      } else if(t <= CFG.SPREAD_END){
-        // Phase 2: spread to the entire screen, including edges/corners.
+  function damageOneTarget(t,o){
+    if(!t||!t.obj||typeof t.obj.hp!=='number'||t.obj.hp<=0) return false;
+    if(t.type==='small'){
+      t.obj.hp-=CFG.SMALL_DAMAGE;
+      safe(function(){ t.obj.hf=Math.max(n(t.obj.hf,0),8); });
+      if(t.obj.hp<=0){
+        safe(function(){ if(typeof sparks==='function') sparks(t.x,t.y,11,t.obj.col||o.col,2.4,15); });
+        safe(function(){ if(typeof playStats!=='undefined') playStats.enemiesKilled++; });
+        safe(function(){ score+=Math.max(CFG.SCORE_PER_SMALL,n(t.obj.pts,0)); });
+        safe(function(){ if(Array.isArray(enemies)){ var idx=enemies.indexOf(t.obj); if(idx>=0) enemies.splice(idx,1); } });
+      }else{
+        safe(function(){ if(typeof sparks==='function') sparks(t.x,t.y,5,o.col,1.6,9); });
+        safe(function(){ score+=6; });
+      }
+    }else{
+      var maxHp=Math.max(1,n(t.obj.maxHp,t.obj.hp));
+      var dmg=t.type==='mega'?CFG.MEGA_DAMAGE:CFG.BOSS_DAMAGE;
+      dmg=Math.min(dmg, Math.max(1.1,maxHp*0.006));
+      t.obj.hp=Math.max(1,t.obj.hp-dmg);
+      safe(function(){ if(typeof sparks==='function') sparks(t.x,t.y,7,o.col,1.9,10); });
+      safe(function(){ score+=CFG.SCORE_PER_BOSS_HIT; });
+    }
+    o.hitFlash=8;
+    return true;
+  }
+  function damageTargetsInsideOrb(o, strong){
+    var list=collectTargets();
+    var r=o.size*1.35 + CFG.CONTACT_DAMAGE_PAD + (strong?12:0);
+    for(var i=0;i<list.length;i++){
+      var t=list[i];
+      if(dist(o.x,o.y,t.x,t.y) <= r + t.r) damageOneTarget(t,o);
+    }
+  }
+  function updateBomb(){
+    if(!STATE.active) return;
+    if(!isPlaying()){ resetBomb(); syncHud(); return; }
+    var w=screenW(), h=screenH();
+    var px=n((typeof player!=='undefined'&&player)&&player.x,w/2), py=n((typeof player!=='undefined'&&player)&&player.y,h-92);
+    var t=++STATE.tick;
+    var attack=t>CFG.SPREAD_END;
+    for(var i=0;i<STATE.orbs.length;i++){
+      var o=STATE.orbs[i];
+      o.trail.push({x:o.x,y:o.y}); if(o.trail.length>7) o.trail.shift();
+      if(t<=CFG.ORBIT_END){
+        o.a+=o.spin;
+        var p1=ease(t/CFG.ORBIT_END);
+        var rr=lerp(16,70+(i%4)*5,p1);
+        o.x=px+Math.cos(o.a)*rr;
+        o.y=py+Math.sin(o.a)*rr*.78;
+      }else if(t<=CFG.SPREAD_END){
         var p2=ease((t-CFG.ORBIT_END)/(CFG.SPREAD_END-CFG.ORBIT_END));
-        o.a += o.spin*0.62;
-        var orbitX = px + Math.cos(o.a)*(78+(i%4)*14);
-        var orbitY = py + Math.sin(o.a)*(58+(i%4)*10);
-        var waveX = Math.sin(t*0.07+o.phase)*28;
-        var waveY = Math.cos(t*0.06+o.phase)*22;
-        o.x = lerp2(orbitX, o.spreadX, p2) + waveX*p2;
-        o.y = lerp2(orbitY, o.spreadY, p2) + waveY*p2;
-      } else {
-        // Phase 3: aim into enemies/bosses with stronger homing damage.
-        var ref=targetByRef(o.target);
-        if(!ref || t%22===0) ref=nearestTarget(o.x,o.y,o.target && o.target.obj);
+        o.a+=o.spin*.52;
+        var ox=px+Math.cos(o.a)*(76+(i%4)*11);
+        var oy=py+Math.sin(o.a)*(58+(i%4)*8);
+        o.x=lerp(ox,o.spreadX,p2)+Math.sin(t*.075+o.phase)*20*p2;
+        o.y=lerp(oy,o.spreadY,p2)+Math.cos(t*.065+o.phase)*16*p2;
+      }else{
+        var ref=targetAlive(o.target);
+        if(!ref||t%20===0) ref=nearestTarget(o.x,o.y,o.target&&o.target.obj);
         o.target=ref;
         if(ref){
           var a=angleTo(o.x,o.y,ref.x,ref.y);
-          var spd=7.2 + Math.min(4.2,(t-CFG.SPREAD_END)*0.035);
-          o.vx = lerp2(num(o.vx,0), Math.cos(a)*spd, 0.16);
-          o.vy = lerp2(num(o.vy,0), Math.sin(a)*spd, 0.16);
-          o.x += o.vx; o.y += o.vy;
-        } else {
-          // No target: perform a screen sweep instead of doing nothing.
-          var sweepA = -Math.PI/2 + (i-CFG.ORB_COUNT/2)*0.13;
-          o.vx = lerp2(num(o.vx,0), Math.cos(sweepA)*5.2, 0.12);
-          o.vy = lerp2(num(o.vy,0), Math.sin(sweepA)*5.2, 0.12);
-          o.x += o.vx; o.y += o.vy;
+          var spd=6.0+Math.min(4.1,(t-CFG.SPREAD_END)*.038);
+          o.vx=lerp(n(o.vx,0),Math.cos(a)*spd,.18);
+          o.vy=lerp(n(o.vy,0),Math.sin(a)*spd,.18);
+        }else{
+          var pa=(i/CFG.ORB_COUNT)*Math.PI*2+t*.025;
+          var tx=w/2+Math.cos(pa)*(w*.32), ty=h*.44+Math.sin(pa)*(h*.24);
+          var aa=angleTo(o.x,o.y,tx,ty);
+          o.vx=lerp(n(o.vx,0),Math.cos(aa)*3.5,.08);
+          o.vy=lerp(n(o.vy,0),Math.sin(aa)*3.5,.08);
         }
-        if(o.x<-80||o.x>CW+80||o.y<-80||o.y>CH+80){
-          // Keep the orb useful for the remaining attack phase.
-          o.x=clamp2(o.x,30,CW-30); o.y=clamp2(o.y,45,CH-45); o.vx*=-0.45; o.vy*=-0.45;
-        }
+        o.x+=o.vx; o.y+=o.vy;
+        if(o.x<-70||o.x>w+70||o.y<-70||o.y>h+70){ o.x=clamp(o.x,28,w-28); o.y=clamp(o.y,42,h-42); o.vx*=-.35; o.vy*=-.35; }
       }
-
-      if((t % CFG.HIT_INTERVAL)===0) damageNearOrb(o, attackMode);
-      cancelTouchedBullets(o);
+      cancelBulletsInsideOrb(o);
+      if(t%CFG.HIT_INTERVAL===0) damageTargetsInsideOrb(o,attack);
       if(o.hitFlash>0) o.hitFlash--;
     }
-
     if(t>=CFG.DURATION){
-      safe(function(){ if(typeof sparks==='function') sparks(px,py,30,'#ffffff',3.4,22); });
-      resetOrbBomb();
+      safe(function(){ if(typeof sparks==='function') sparks(px,py,18,'#ffffff',2.4,14); });
+      resetBomb();
     }
+    syncHud();
   }
-
-  function drawOrbBomb(){
-    if(!VS_ORB_BOMB.active || typeof ctx==='undefined') return;
-    var t=VS_ORB_BOMB.tick;
-    var fade = t>CFG.DURATION-34 ? (CFG.DURATION-t)/34 : 1;
-    fade=clamp2(fade,0,1);
-    ctx.save();
-    ctx.globalCompositeOperation='lighter';
-
-    // Draw trails first for motion clarity.
-    for(var i=0;i<VS_ORB_BOMB.orbs.length;i++){
-      var o=VS_ORB_BOMB.orbs[i];
+  function drawBomb(){
+    if(!STATE.active||typeof ctx==='undefined') return;
+    var t=STATE.tick, fade=t>CFG.DURATION-28?(CFG.DURATION-t)/28:1; fade=clamp(fade,0,1);
+    ctx.save(); ctx.globalCompositeOperation='lighter';
+    for(var i=0;i<STATE.orbs.length;i++){
+      var o=STATE.orbs[i];
       for(var k=0;k<o.trail.length;k++){
         var tr=o.trail[k], a=(k+1)/o.trail.length;
-        ctx.globalAlpha=0.12*a*fade;
-        ctx.fillStyle=o.col;
-        ctx.shadowColor=o.col;
-        ctx.shadowBlur=16;
-        ctx.beginPath(); ctx.arc(tr.x,tr.y,o.size*(0.42+0.06*k),0,Math.PI*2); ctx.fill();
+        ctx.globalAlpha=.10*a*fade; ctx.fillStyle=o.col; ctx.shadowColor=o.col; ctx.shadowBlur=13;
+        ctx.beginPath(); ctx.arc(tr.x,tr.y,o.size*(.38+.05*k),0,Math.PI*2); ctx.fill();
       }
     }
-
-    for(var j=0;j<VS_ORB_BOMB.orbs.length;j++){
-      var ob=VS_ORB_BOMB.orbs[j];
-      var pulse=1+Math.sin(t*0.19+ob.phase)*0.13+(ob.hitFlash>0?0.28:0);
-      var grow=t<24?t/24:1;
-      var sz=ob.size*pulse*grow;
+    for(var j=0;j<STATE.orbs.length;j++){
+      var ob=STATE.orbs[j];
+      var pulse=1+Math.sin(t*.18+ob.phase)*.12+(ob.hitFlash>0?.25:0);
+      var grow=t<18?t/18:1, sz=ob.size*pulse*grow;
       var g=ctx.createRadialGradient(ob.x,ob.y,1,ob.x,ob.y,sz*2.25);
-      g.addColorStop(0,'#ffffff');
-      g.addColorStop(0.22,ob.col);
-      g.addColorStop(0.67,ob.col+'99');
-      g.addColorStop(1,'rgba(255,255,255,0)');
-      ctx.globalAlpha=0.9*fade;
-      ctx.fillStyle=g;
-      ctx.shadowColor=ob.col;
-      ctx.shadowBlur=34;
-      ctx.beginPath(); ctx.arc(ob.x,ob.y,sz*2.05,0,Math.PI*2); ctx.fill();
-      ctx.globalAlpha=1*fade;
-      ctx.fillStyle=ob.col;
-      ctx.beginPath(); ctx.arc(ob.x,ob.y,sz,0,Math.PI*2); ctx.fill();
-      ctx.strokeStyle='#ffffff'; ctx.lineWidth=2.2;
-      ctx.beginPath(); ctx.arc(ob.x,ob.y,sz*1.08,0,Math.PI*2); ctx.stroke();
+      g.addColorStop(0,'#fff'); g.addColorStop(.22,ob.col); g.addColorStop(.72,ob.col+'88'); g.addColorStop(1,'rgba(255,255,255,0)');
+      ctx.globalAlpha=.86*fade; ctx.fillStyle=g; ctx.shadowColor=ob.col; ctx.shadowBlur=24;
+      ctx.beginPath(); ctx.arc(ob.x,ob.y,sz*2.0,0,Math.PI*2); ctx.fill();
+      ctx.globalAlpha=1*fade; ctx.fillStyle=ob.col; ctx.beginPath(); ctx.arc(ob.x,ob.y,sz,0,Math.PI*2); ctx.fill();
+      ctx.strokeStyle='#fff'; ctx.lineWidth=2; ctx.beginPath(); ctx.arc(ob.x,ob.y,sz*1.08,0,Math.PI*2); ctx.stroke();
     }
-
-    // Phase rings: visible rotate-circle then spread warning circle.
-    var px=num(player && player.x,240), py=num(player && player.y,520);
-    ctx.globalAlpha=0.18*fade;
-    ctx.strokeStyle='#ffffff'; ctx.shadowColor='#ffffff'; ctx.shadowBlur=18; ctx.lineWidth=2;
-    if(t<=CFG.ORBIT_END){ ctx.beginPath(); ctx.arc(px,py,72,0,Math.PI*2); ctx.stroke(); }
-    else if(t<=CFG.SPREAD_END){
-      var p=ease((t-CFG.ORBIT_END)/(CFG.SPREAD_END-CFG.ORBIT_END));
-      ctx.beginPath(); ctx.arc(px,py,lerp2(90,360,p),0,Math.PI*2); ctx.stroke();
-    }
+    var px=n((typeof player!=='undefined'&&player)&&player.x,screenW()/2), py=n((typeof player!=='undefined'&&player)&&player.y,screenH()-92);
+    ctx.globalAlpha=.16*fade; ctx.strokeStyle='#fff'; ctx.shadowColor='#fff'; ctx.shadowBlur=12; ctx.lineWidth=1.7;
+    if(t<=CFG.ORBIT_END){ ctx.beginPath(); ctx.arc(px,py,74,0,Math.PI*2); ctx.stroke(); }
     ctx.restore();
   }
-
-  function useOrbBomb(){
-    if(typeof gameRunning!=='undefined' && !gameRunning) return false;
+  function useBomb(){
+    if(!isPlaying()) return false;
     if(typeof R1==='undefined') return false;
-    if((R1.bombs||0)<=0 || (R1.bombCooldown||0)>0){ syncBombHud(); return false; }
-
-    R1.bombs=Math.max(0,(R1.bombs||0)-1);
+    var key=(typeof frame!=='undefined'?frame:Date.now())+':'+Math.floor(performance&&performance.now?performance.now()/60:Date.now()/60);
+    if(STATE.lastUseKey===key) return false;
+    if(n(R1.bombs,0)<=0||n(R1.bombCooldown,0)>0){ syncHud(); return false; }
+    STATE.lastUseKey=key;
+    R1.bombs=Math.max(0,Math.floor(n(R1.bombs,0))-1);
     R1.bombCooldown=CFG.COOLDOWN;
-    if(player) player.inv=Math.max(num(player.inv,0), CFG.INV);
-
-    // Critical: no bullets=[], no lasers=[], no bossRotLasers=[], no greenEnemyLasers=[] here.
-    startOrbBomb();
-    syncBombHud();
+    safe(function(){ if(typeof player!=='undefined'&&player) player.inv=Math.max(n(player.inv,0),CFG.INV); });
+    startBomb();
+    syncHud();
     return true;
   }
-
-  function installOrbBomb(){
+  function install(){
+    window.r1UseBomb=useBomb;
+    safe(function(){ r1UseBomb=useBomb; });
+    if(typeof r1Reset==='function'&&!r1Reset.__vs112BombWrapped){
+      var oldReset=r1Reset;
+      r1Reset=function(){ var r=oldReset.apply(this,arguments); resetBomb(); if(typeof R1!=='undefined'){ R1.bombs=CFG.START_BOMBS; R1.bombCooldown=0; } syncHud(); return r; };
+      r1Reset.__vs112BombWrapped=true; window.r1Reset=r1Reset;
+    }
+    if(typeof r1UpdateGraze==='function'&&!r1UpdateGraze.__vs112BombWrapped){
+      var oldGraze=r1UpdateGraze;
+      r1UpdateGraze=function(){ var r=oldGraze.apply(this,arguments); updateBomb(); return r; };
+      r1UpdateGraze.__vs112BombWrapped=true; window.r1UpdateGraze=r1UpdateGraze;
+    }
+    if(typeof drawPlayer==='function'&&!drawPlayer.__vs112BombWrapped){
+      var oldDraw=drawPlayer;
+      drawPlayer=function(){ drawBomb(); return oldDraw.apply(this,arguments); };
+      drawPlayer.__vs112BombWrapped=true; window.drawPlayer=drawPlayer;
+    }
     safe(function(){
-      if(typeof r1UseBomb==='function' || typeof r1UseBomb==='undefined'){
-        r1UseBomb=useOrbBomb;
-        window.r1UseBomb=useOrbBomb;
+      var btn=document.getElementById('bomb-btn'); if(!btn) return;
+      if(!btn.__vs112Cleaned){
+        var clone=btn.cloneNode(true);
+        clone.__vs112Cleaned=true;
+        btn.parentNode.replaceChild(clone,btn);
+        btn=clone;
       }
-    });
-    safe(function(){
-      if(typeof r1Reset==='function' && !r1Reset.__vsSpreadHomingBombWrapped){
-        var oldReset=r1Reset;
-        r1Reset=function(){ var r=oldReset.apply(this,arguments); resetOrbBomb(); if(typeof R1!=='undefined'){ R1.bombs=CFG.START_BOMBS; R1.bombCooldown=0; } syncBombHud(); return r; };
-        r1Reset.__vsSpreadHomingBombWrapped=true;
-        window.r1Reset=r1Reset;
-      }
-    });
-    safe(function(){
-      if(typeof r1UpdateGraze==='function' && !r1UpdateGraze.__vsSpreadHomingBombWrapped){
-        var oldGraze=r1UpdateGraze;
-        r1UpdateGraze=function(){ var r=oldGraze.apply(this,arguments); updateOrbBomb(); syncBombHud(); return r; };
-        r1UpdateGraze.__vsSpreadHomingBombWrapped=true;
-        window.r1UpdateGraze=r1UpdateGraze;
-      }
-    });
-    safe(function(){
-      if(typeof drawPlayer==='function' && !drawPlayer.__vsSpreadHomingBombWrapped){
-        var oldDraw=drawPlayer;
-        drawPlayer=function(){ drawOrbBomb(); return oldDraw.apply(this,arguments); };
-        drawPlayer.__vsSpreadHomingBombWrapped=true;
-        window.drawPlayer=drawPlayer;
-      }
-    });
-    safe(function(){
-      var btn=document.getElementById('bomb-btn');
-      if(btn && !btn.__vsSpreadHomingBombDirectBound){
-        btn.__vsSpreadHomingBombDirectBound=true;
+      if(!btn.__vs112Bound){
+        btn.__vs112Bound=true;
         ['pointerup','touchend','click'].forEach(function(ev){
-          btn.addEventListener(ev,function(e){
-            if(e){ e.preventDefault(); e.stopPropagation(); if(e.stopImmediatePropagation) e.stopImmediatePropagation(); }
-            return useOrbBomb();
-          },true);
+          btn.addEventListener(ev,function(e){ if(e){ e.preventDefault(); e.stopPropagation(); if(e.stopImmediatePropagation) e.stopImmediatePropagation(); } return useBomb(); },true);
         });
       }
     });
-    VS_ORB_BOMB.installCount++;
-    window.VOID_STORM_ORB_BOMB_AUDIT=VS_ORB_BOMB.audit;
+    window.VOID_STORM_ORB_BOMB_AUDIT=STATE.audit;
     window.VOID_STORM_ORB_BOMB_AUDIT.installed=true;
-    window.VOID_STORM_ORB_BOMB_AUDIT.installCount=VS_ORB_BOMB.installCount;
+    syncHud();
   }
-
-  installOrbBomb();
-  var tries=0;
-  var id=setInterval(function(){
-    tries++;
-    installOrbBomb();
-    if(tries>28) clearInterval(id);
-  },250);
+  install();
+  var tries=0, timer=setInterval(function(){ tries++; install(); if(tries>=8) clearInterval(timer); },500);
 })();
 </script>
-<!-- ============= END VOID STORM v1: ORBIT-SPREAD-HOMING ORB BOMB FINAL ============= -->
+<!-- ============= END VOID STORM v1.1.2: CONTACT-ONLY ORB BOMB FINAL ============= -->
+
 
 <!-- ================= VOID STORM v1.1: MOBILE LAG + FAIR DEATH SURGICAL FIX ================= -->
 <script id="vs-v1-1-mobile-lag-survivability-fix">
@@ -17827,12 +17766,26 @@ Keeps existing branch IDs, but maps every boss key + difficulty + phase to a rea
   function arr(name){ return safe(function(){ return Array.isArray(window[name]) ? window[name] : (typeof eval(name)!=='undefined' && Array.isArray(eval(name)) ? eval(name) : []); }) || []; }
   function setArr(name,v){ safe(function(){ window[name]=v; eval(name+'=v'); }); }
   function visibleOrNear(b,pad){ return b && isFinite(b.x) && isFinite(b.y) && b.x>-pad && b.x<480+pad && b.y>-pad && b.y<640+pad; }
+  function hasBossPressure(){
+    var active=false;
+    safe(function(){ if(Array.isArray(bosses)) active = active || bosses.some(function(b){ return b && Number(b.hp)>0; }); });
+    safe(function(){ active = active || (typeof boss!=='undefined' && boss && Number(boss.hp)>0); });
+    safe(function(){ active = active || (typeof megaBoss!=='undefined' && megaBoss && Number(megaBoss.hp)>0); });
+    return !!active;
+  }
   function trimBullets(max){
-    var a=arr('bullets'); if(a.length<=max) return;
-    var pad=72, visible=[], off=[];
+    var a=arr('bullets');
+    var bossActive=hasBossPressure();
+    var limit=bossActive ? max : Math.max(max+260, Math.round(max*1.45));
+    if(a.length<=limit) return;
+    var pad=90, visible=[], off=[];
     for(var i=0;i<a.length;i++){ if(visibleOrNear(a[i],pad)) visible.push(a[i]); else off.push(a[i]); }
-    if(visible.length>max){ visible=visible.slice(visible.length-max); }
-    var keep=max-visible.length;
+    var overflow=Math.max(0, visible.length-limit);
+    if(overflow>0){
+      // Gradual visible-bullet trim avoids the obvious "all bullets vanished" effect on mobile.
+      visible=visible.slice(Math.min(overflow, bossActive?80:28));
+    }
+    var keep=Math.max(0, limit-visible.length);
     setArr('bullets', visible.concat(off.slice(Math.max(0,off.length-keep))));
   }
   function capArray(name,max){ var a=arr(name); if(a.length>max) setArr(name,a.slice(a.length-max)); }
@@ -17877,7 +17830,7 @@ Keeps existing branch IDs, but maps every boss key + difficulty + phase to a rea
   if(!window.__VS11_PLAYER_IMMUNITY_WATCHDOG__){
     window.__VS11_PLAYER_IMMUNITY_WATCHDOG__=setInterval(function(){ safe(function(){ if(!gameRunning||!player) return; var c=cfg(); player.invDur=c.inv; if(player.inv>c.orbInv+18) player.inv=c.orbInv; applyPlayerBalance(); v11PerformanceGuard(); }); },900);
   }
-  window.VOID_STORM_V11_AUDIT={version:'v1.1 surgical mobile lag + survivability fix',installedAt:now(),performanceCaps:'difficulty-based bullet/particle/laser caps with far-offscreen cleanup only',survivability:'difficulty-based HP, shorter invincibility, larger practical hitbox, capped bomb immunity, no pause immunity stacking',preserved:['bosses','enemies','gallery','music/audio unlock','pause','bomb','difficulty buttons','mobile touch controls','GitHub Pages single-file structure']};
+  window.VOID_STORM_V11_AUDIT={version:'v1.1.2 contact-only orb bomb + mobile lag + survivability fix',installedAt:now(),bombBehavior:'orbs clear only bullets inside the visible orb; no delayed wipe after bomb ends',performanceCaps:'difficulty-based bullet/particle/laser caps with far-offscreen cleanup only',survivability:'difficulty-based HP, shorter invincibility, larger practical hitbox, capped bomb immunity, no pause immunity stacking',preserved:['bosses','enemies','gallery','music/audio unlock','pause','bomb','difficulty buttons','mobile touch controls','GitHub Pages single-file structure']};
 })();
 </script>
 <!-- =============== END VOID STORM v1.1: MOBILE LAG + FAIR DEATH SURGICAL FIX =============== -->
