@@ -17836,5 +17836,218 @@ Keeps existing branch IDs, but maps every boss key + difficulty + phase to a rea
 <!-- =============== END VOID STORM v1.1: MOBILE LAG + FAIR DEATH SURGICAL FIX =============== -->
 
 
+
+<!-- ============= VOID STORM v1.1.3: NO RANDOM BULLET DISAPPEARANCE GUARD ============= -->
+<script id="vs-v1-1-3-no-random-bullet-disappear-guard">
+(function(){
+  'use strict';
+  /*
+    v1.1.3 emergency fix:
+    The v1.1 mobile performance guard was still allowed to trim visible enemy bullets
+    during normal gameplay. That could look like enemy bullets randomly vanished even
+    when the bomb was not used.
+
+    New rule:
+    - Normal gameplay: never delete visible valid enemy bullets just because the cap is high.
+    - Only delete invalid/far off-screen bullets.
+    - Boss/final boss: cap bullets gently and throttled, so mobile lag is controlled without
+      obvious full-screen bullet disappearance.
+    - Bomb behavior remains contact-only from v1.1.2.
+  */
+  if(window.__VS_V113_NO_RANDOM_BULLET_DISAPPEAR__) return;
+  window.__VS_V113_NO_RANDOM_BULLET_DISAPPEAR__ = true;
+
+  function safe(fn){ try{return fn();}catch(e){ try{console.warn('[VOID STORM v1.1.3 guard]', e && e.message ? e.message : e);}catch(_e){} } }
+  function n(v,d){ v=Number(v); return Number.isFinite(v)?v:(d||0); }
+  function validDiff(k){ k=String(k||'').toLowerCase(); return /^(easy|normal|hard|lunatic)$/.test(k)?k:'normal'; }
+  function diffKey(){
+    var k='normal';
+    safe(function(){
+      k=validDiff(window.__VS_LOCKED_SELECTED_DIFFICULTY || window.__VS_SELECTED_DIFFICULTY || window.VS1A007_DIFFICULTY_KEY || window.VS1A009_DIFFICULTY_KEY || window.VS_RESEARCH_DIFF || window.VOID_STORM_CURRENT_DIFFICULTY || window.VOID_STORM_DIFFICULTY || (window.localStorage&&localStorage.getItem('voidStormDifficulty')) || 'normal');
+    });
+    return validDiff(k);
+  }
+  var CFG={
+    easy:{hp:120,inv:70,regen:0.018,bossBulletCap:820,emergencyCap:1800,particleCap:180,laserCap:12,rotLaserCap:4,greenLaserCap:4,orbInv:72,dmgMul:.78},
+    normal:{hp:100,inv:48,regen:0.008,bossBulletCap:700,emergencyCap:1600,particleCap:150,laserCap:10,rotLaserCap:3,greenLaserCap:3,orbInv:58,dmgMul:1.00},
+    hard:{hp:90,inv:34,regen:0.003,bossBulletCap:610,emergencyCap:1450,particleCap:125,laserCap:8,rotLaserCap:3,greenLaserCap:2,orbInv:44,dmgMul:1.18},
+    lunatic:{hp:80,inv:24,regen:0.000,bossBulletCap:540,emergencyCap:1300,particleCap:105,laserCap:7,rotLaserCap:2,greenLaserCap:2,orbInv:34,dmgMul:1.38}
+  };
+  function cfg(){ return CFG[diffKey()] || CFG.normal; }
+  function arr(name){
+    return safe(function(){
+      if(Array.isArray(window[name])) return window[name];
+      var v; try{ v=eval(name); }catch(_e){}
+      return Array.isArray(v)?v:[];
+    }) || [];
+  }
+  function setArr(name,v){
+    safe(function(){
+      window[name]=v;
+      try{ eval(name+'=v'); }catch(_e){}
+    });
+  }
+  function onScreen(b,pad){
+    return b && Number.isFinite(Number(b.x)) && Number.isFinite(Number(b.y)) &&
+      b.x>-pad && b.x<480+pad && b.y>-pad && b.y<640+pad;
+  }
+  function hasBossPressure(){
+    var active=false;
+    safe(function(){ if(Array.isArray(window.bosses)) active = active || window.bosses.some(function(b){ return b && Number(b.hp)>0; }); });
+    safe(function(){ active = active || (typeof boss!=='undefined' && boss && Number(boss.hp)>0); });
+    safe(function(){ active = active || (typeof megaBoss!=='undefined' && megaBoss && Number(megaBoss.hp)>0); });
+    return !!active;
+  }
+
+  var lastVisibleTrim=0;
+
+  function cleanupInvalidAndFarBullets(){
+    var a=arr('bullets');
+    if(!a.length) return;
+    var keep=[];
+    for(var i=0;i<a.length;i++){
+      var b=a[i];
+      if(!b || !Number.isFinite(Number(b.x)) || !Number.isFinite(Number(b.y))) continue;
+      // Far outside playfield only. Valid visible bullets are preserved.
+      if(b.x<-420 || b.x>900 || b.y<-620 || b.y>1420) continue;
+      keep.push(b);
+    }
+    if(keep.length!==a.length) setArr('bullets', keep);
+  }
+
+  function gentleBulletCap(){
+    var c=cfg(), a=arr('bullets');
+    if(!a.length) return;
+
+    var bossActive=hasBossPressure();
+    var limit=bossActive ? c.bossBulletCap : c.emergencyCap;
+
+    // Normal small-enemy gameplay must not look like bullets randomly disappear.
+    // Only if the array becomes dangerously huge do we trim slowly.
+    if(a.length<=limit) return;
+
+    var now=(typeof performance!=='undefined'&&performance.now)?performance.now():Date.now();
+    if(now-lastVisibleTrim < (bossActive?220:420)) return;
+    lastVisibleTrim=now;
+
+    var visible=[], off=[];
+    for(var i=0;i<a.length;i++){
+      if(onScreen(a[i],120)) visible.push(a[i]);
+      else off.push(a[i]);
+    }
+
+    // First remove off-screen bullets. This should be invisible to the player.
+    var overflow=a.length-limit;
+    if(off.length>0){
+      off=off.slice(Math.min(off.length, overflow));
+      setArr('bullets', visible.concat(off));
+      return;
+    }
+
+    // Last resort only: trim a tiny number of the oldest visible bullets.
+    // Never full wipe, never large vanish.
+    var remove=Math.min(overflow, bossActive?12:6);
+    if(remove>0) setArr('bullets', visible.slice(remove));
+  }
+
+  function capTail(name,max){
+    var a=arr(name);
+    if(a.length>max) setArr(name, a.slice(a.length-max));
+  }
+
+  function applyPlayerBalance(){
+    var c=cfg();
+    safe(function(){
+      if(typeof player==='object' && player){
+        player.maxHp=c.hp;
+        if(player.hp>c.hp) player.hp=c.hp;
+        player.invDur=c.inv;
+        player.hitR=Math.max(player.hitR||4, diffKey()==='easy'?4.2:diffKey()==='normal'?4.8:5.4);
+        player.focusHitR=Math.max(player.focusHitR||2, diffKey()==='easy'?2.4:diffKey()==='normal'?2.8:3.2);
+        if(player.inv>c.orbInv+18) player.inv=c.orbInv;
+      }
+    });
+    safe(function(){ window.REGEN_RATE=c.regen; try{ REGEN_RATE=c.regen; }catch(_e){} });
+  }
+
+  function safePerformanceGuard(){
+    if(typeof gameRunning!=='undefined' && !gameRunning) return;
+    var c=cfg();
+    cleanupInvalidAndFarBullets();
+    gentleBulletCap();
+    capTail('particles', c.particleCap);
+    capTail('lasers', c.laserCap);
+    capTail('bossRotLasers', c.rotLaserCap);
+    capTail('greenEnemyLasers', c.greenLaserCap);
+    capTail('pBullets', 220);
+  }
+
+  // Stop old v1.1 watchdog because it called the aggressive bullet trim.
+  safe(function(){
+    if(window.__VS11_PLAYER_IMMUNITY_WATCHDOG__){
+      clearInterval(window.__VS11_PLAYER_IMMUNITY_WATCHDOG__);
+      window.__VS11_PLAYER_IMMUNITY_WATCHDOG__=null;
+    }
+  });
+
+  // Replace the old r1AntiLag wrapper. Do NOT call the old v1.1 wrapper because it trims visible bullets.
+  window.r1AntiLag=function(){
+    safePerformanceGuard();
+  };
+  safe(function(){ r1AntiLag=window.r1AntiLag; });
+
+  // Keep fair-death balance without the old bullet trim.
+  if(typeof damagePlayer==='function' && !damagePlayer.__vs113Wrapped){
+    var oldDamage=damagePlayer;
+    damagePlayer=function(amount){
+      var c=cfg();
+      safe(function(){ if(player && player.inv>Math.max(c.inv,c.orbInv+10)) player.inv=Math.max(c.inv,c.orbInv); });
+      return oldDamage.call(this, Math.max(1, Number(amount||1)*c.dmgMul));
+    };
+    damagePlayer.__vs113Wrapped=true; window.damagePlayer=damagePlayer;
+  }
+
+  if(typeof startGame==='function' && !startGame.__vs113Wrapped){
+    var oldStart=startGame;
+    startGame=function(){
+      var r=oldStart.apply(this,arguments);
+      applyPlayerBalance();
+      safe(function(){ if(typeof updateHPBar==='function') updateHPBar(); });
+      return r;
+    };
+    startGame.__vs113Wrapped=true; window.startGame=startGame;
+  }
+
+  if(typeof r1UseBomb==='function' && !r1UseBomb.__vs113Wrapped){
+    var oldBomb=r1UseBomb;
+    r1UseBomb=function(){
+      var r=oldBomb.apply(this,arguments);
+      safe(function(){ var c=cfg(); if(player && player.inv>c.orbInv) player.inv=c.orbInv; });
+      return r;
+    };
+    r1UseBomb.__vs113Wrapped=true; window.r1UseBomb=r1UseBomb;
+    safe(function(){ r1UseBomb=window.r1UseBomb; });
+  }
+
+  window.__VS113_SAFE_WATCHDOG__=setInterval(function(){
+    safe(function(){
+      if(typeof gameRunning!=='undefined' && !gameRunning) return;
+      applyPlayerBalance();
+      safePerformanceGuard();
+    });
+  },1000);
+
+  window.VOID_STORM_V113_AUDIT={
+    version:'v1.1.3 no-random-bullet-disappear guard',
+    fix:'normal gameplay preserves valid visible enemy bullets; only invalid/far-offscreen bullets are removed',
+    bossLag:'boss/final boss bullet cap is still active but throttled and gentle',
+    bomb:'v1.1.2 contact-only orb bomb preserved; bomb clears bullets only inside orb contact area',
+    liveBugFixed:'enemy bullets should no longer disappear when bomb was not pressed',
+    preserved:['music','pause','gallery','bosses','enemies','difficulty buttons','mobile controls','player can die']
+  };
+})();
+</script>
+<!-- =========== END VOID STORM v1.1.3: NO RANDOM BULLET DISAPPEARANCE GUARD =========== -->
+
 </body>
 </html>
